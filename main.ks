@@ -15,7 +15,7 @@
 # import name { var1, var2, var3 }
 # import name { ... }
 
-let def-var = func (param-var1, param-var2?, param-var2...) {
+let def-var = func (param-var1, ~param-var2, *param-var3) {
   # comment
   let var0 = nil, var1 = expr1, var2 = var1, var3 = 1, var4 = true, var5 = false, var6 = "string"
   let var6 = add(1, 2), var7 = mul(1, 2), var8 = sub(1, 2), var9 = div(1, 2)
