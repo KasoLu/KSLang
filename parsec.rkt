@@ -4,71 +4,62 @@
 (require "utils.rkt")
 
 (define @decorate
-  (lambda (parser d-ctx d-succ d-fail)
-    (lambda (tokens ctx k-ctx k-succ k-fail)
-      (parser tokens (d-ctx ctx) k-ctx (d-succ k-succ) (d-fail k-fail)))))
+  (lambda (parser d-ctx d-token d-succ d-fail)
+    (lambda (tokens ctx k-token k-succ k-fail)
+      (parser tokens (d-ctx ctx) (d-token k-token) (d-succ k-succ) (d-fail k-fail)))))
 
 (define @success
   (lambda (parser bind)
-    (lambda (tokens ctx k-ctx k-succ k-fail)
-      (let ([succ (lambda (t tokens ctx) ((bind t) tokens ctx k-ctx k-succ k-fail))])
-        (parser tokens ctx k-ctx succ k-fail)))))
+    (lambda (tokens ctx k-token k-succ k-fail)
+      (let ([succ (lambda (t tokens* ctx*) ((bind t) tokens* ctx* k-token k-succ k-fail))])
+        (parser tokens ctx k-token succ k-fail)))))
 
 (define @failure
   (lambda (parser bind)
-    (lambda (tokens ctx k-ctx k-succ k-fail)
-      (let ([fail (lambda (tokens* ctx*) ((bind) tokens ctx k-ctx k-succ k-fail))])
-        (parser tokens ctx k-ctx k-succ fail)))))
+    (lambda (tokens ctx k-token k-succ k-fail)
+      (let ([fail (lambda (tokens* ctx*) ((bind) tokens ctx k-token k-succ k-fail))])
+        (parser tokens ctx k-token k-succ fail)))))
 
 (define @const
   (lambda (x)
-    (lambda (tokens ctx k-ctx k-succ k-fail)
+    (lambda (tokens ctx k-token k-succ k-fail)
       (k-succ x tokens ctx))))
 
 (define @error
   (lambda ()
-    (lambda (tokens ctx k-ctx k-succ k-fail)
+    (lambda (tokens ctx k-token k-succ k-fail)
       (k-fail tokens ctx))))
 
 (define @token
   (lambda (pred)
-    (lambda (tokens ctx k-ctx k-succ k-fail)
+    (lambda (tokens ctx k-token k-succ k-fail)
       (cond [(null? tokens) (k-fail tokens ctx)]
-            [(pred (car tokens)) ((k-ctx k-succ) (car tokens) (cdr tokens) ctx)]
+            [(pred tokens ctx) (k-token tokens ctx k-succ)]
             [else (k-fail tokens ctx)]))))
 
 (define @and
   (lambda parsers
-    (define and-parser
-      (let loop ([parsers parsers])
-        (if (null? parsers)
-            (@const '())
-            (@success (car parsers) 
-              (lambda (t)
-                (@success (loop (cdr parsers))
-                  (lambda (ts)
-                    (@const (cons t ts)))))))))
-    (lambda (tokens ctx k-ctx k-succ k-fail)
-      (and-parser tokens ctx k-ctx k-succ (lambda (tokens* ctx*) (k-fail tokens ctx))))))
+    (define combine
+      (lambda (p ps)
+        (@success p (lambda (t) (@success ps (lambda (ts) (@const (cons t ts))))))))
+    (let ([parser (foldr combine (@const '()) parsers)])
+      (lambda (tokens ctx k-token k-succ k-fail)
+        (parser tokens ctx k-token k-succ (lambda (tokens* ctx*) (k-fail tokens ctx)))))))
 
 (define @or
   (lambda parsers
-    (let loop ([parsers parsers])
-      (if (null? parsers)
-        (@error)
-        (@failure (car parsers) 
-          (lambda () (loop (cdr parsers))))))))
+    (foldr (lambda (p ps) (@failure p (lambda () ps))) (@error) parsers)))
 
 (define @not
   (lambda (parser)
-    (lambda (tokens ctx k-ctx k-succ k-fail)
-      (parser tokens ctx k-ctx
+    (lambda (tokens ctx k-token k-succ k-fail)
+      (parser tokens ctx k-token
         (lambda (t tokens* ctx*)
           (k-fail tokens ctx))
         (lambda (tokens* ctx*)
           (if (null? tokens)
             (k-fail tokens ctx)
-            ((k-ctx k-succ) (car tokens) (cdr tokens) ctx)))))))
+            (k-token tokens ctx k-succ)))))))
 
 (define @?
   (lambda (parser)

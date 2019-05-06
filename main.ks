@@ -1,5 +1,5 @@
 # Program ::= <Expression>+
-# Expression ::= Number | Boolean | Lambda | Identifier
+# Expression ::= Number | Identifier | Lambda
 # Expression ::= let Bindings
 # Expression ::= func ( FormalParams ) Expression
 # Expression ::= cond { <<else | Expression> -> Expression>+ }
