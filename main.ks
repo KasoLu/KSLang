@@ -1,10 +1,10 @@
 # Program ::= <Expression>+
 # Expression ::= Number | Boolean | Nil | Identifier
 # Expression ::= let Bindings
-# Expression ::= func ( FormalParams ) Expression
+# Expression ::= func ( FormalParams ) MutliExpression
 # Expression ::= cond { <<else | Expression> -> Expression>+ }
 # Expression ::= Expression ( Arguments )
-# Expression ::= { <Expression>* }
+# MutliExpression ::= { <Expression>* }
 # Bindings ::= <Identifier = Expression>(,)+
 # FormalParams ::= <Identifier <? | ...>?>(,)*
 # Arguments ::= <<Identifier =>? Expression>(,)*

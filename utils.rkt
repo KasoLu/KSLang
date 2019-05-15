@@ -13,7 +13,7 @@
       (foldl (lambda (f v) (f v)) v funcs))))
 
 (define chars->symbol
-  (pipe flatten list->string string->symbol))
+  (pipe list->string string->symbol))
 
 (define chars->number
-  (pipe flatten list->string string->number))
+  (pipe list->string string->number))

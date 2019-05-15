@@ -1,179 +1,177 @@
 #lang racket
 
-;(provide kslang:scanner (struct-out Lex-token) context-get)
-(provide (all-defined-out))
-
-(require racket/trace)
 (require "utils.rkt")
-(require "opc.rkt")
+(require "parsec.rkt")
 
-;; ----- struct -----
-(struct Value [index stashs tokens rests errors] #:transparent)
-(struct Index [line cursor] #:transparent)
-(struct Stash [char index] #:transparent)
+(provide scan (struct-out Token) (struct-out Index))
+
+;; ===== struct ===== ;;
 (struct Token [val index] #:transparent)
 
-;; ----- helper -----
-(define value-make
-  (lambda (text)
-    (Value (Index 1 1) '() '() (string->list text) '())))
+(struct Stream [chars index] #:transparent)
+(struct Index [line cursor] #:transparent)
 
-(define index-next
-  (lambda (index char)
-    (if (char=? char #\newline) 
-      (Index (add1 (Index-line index)) 1)
-      (Index (Index-line index) (add1 (Index-cursor index))))))
+;; ===== func ===== ;;
+(define scan
+  (lambda (text cont)
+    (init-parse-error!)
+    (init-shown-error!)
+    (($tokens) 
+      (Stream (string->list text) (Index 1 1))
+      (lambda (t stm)
+        (if (not t)
+          (error 'scan *shown-error*)
+          (cont t))))))
 
-(define char-pred
-  (lambda (pred)
-    (lambda (value)
-      (let ([rests (Value-rests value)])
-        (and (pair? rests) (pred (car rests)))))))
+;; ===== data ===== ;
+(define *comment-start* "#")
 
-(define char-next
-  (lambda (value)
-    (match value
-      [(Value index stashs tokens rests errors)
-       (let ([curr-char (car rests)])
-         (Value (index-next index curr-char) (cons (Stash curr-char index) stashs) tokens (cdr rests) errors))])))
+(define *parse-error* (void))
+(define (init-parse-error!)
+  (set! *parse-error* '()))
 
-(define token-compound
-  (lambda (value compound-func)
-    (match value
-      [(Value index stashs tokens rests errors)
-       (let ([token (stashs->token (reverse stashs) compound-func)])
-         (if (Token? token)
-           (Value index '() (cons token tokens) rests errors)
-           (Value index '() tokens rests errors)))])))
+(define *shown-error* (void))
+(define (init-shown-error!)
+  (set! *shown-error* ""))
 
-(define stashs->token
-  (lambda (stashs token-make-func)
-    (if (null? stashs)
-      (void)
-      (match (car stashs)
-        [(Stash _ index)
-         (token-make-func (list->string (map Stash-char stashs)) index)]))))
+;; ===== func parser ===== ;;
+(@:: (@pred pred)
+     (lambda (stm cont)
+       (match stm
+         [(Stream chs idx)
+          (cond [(null? chs)
+                 (cont #f stm)]
+                [(pred (car chs)) 
+                 (cont (car chs) (Stream (cdr chs) (index-inc idx (car chs))))]
+                [else 
+                 (set! *parse-error* (cons chs idx))
+                 (cont #f stm)])])))
 
-(define content->skip
-  (lambda (content index) '()))
+(@:: (@. c)
+     (@pred (lambda (t) (char=? c t))))
 
-(define content->number 
-  (lambda (content index) (Token (string->number content) index)))
+(@:: (@~ str)
+     (apply @cat (map @. (string->list str))))
 
-(define content->symbol
-  (lambda (content index) (Token (string->symbol content) index)))
+(@:: (@group tag p func)
+     (lambda (stm cont)
+       (p stm
+         (lambda (t stm*)
+           (cond [(and (not t) (null? (Stream-chars stm*)))
+                  (cont #f stm)]
+                 [(not t)
+                  (generate-parse-error tag)
+                  (cont #f stm)]
+                 [else
+                  (cont (Token (func t) (Stream-index stm)) stm*)])))))
 
-(define error-make
-  (lambda (value tag)
-    (match value
-      [(Value index stashs tokens rests errors)
-       (let ([new-error
-               (if (null? rests)
-                 (format "~a: rests is empty~n" tag)
-                 (format "[~a:~a] '~a' is not satified" (Index-line index) (Index-cursor index) (car rests)))])
-         (Value index stashs tokens rests (cons new-error errors)))])))
+;; ===== parser ===== ;;
+($:: ($digit)
+     (@pred char-numeric?))
 
-;; ----- parser -----
-(define $item
-  (lambda (pred)
-    (@succ (@pred (char-pred pred)) (pipe char-next @const))))
+($:: ($letter)
+     (@pred char-alphabetic?))
 
-(define $range
-  (lambda (start end)
-    ($item (lambda (x) (and (char<=? start x) (char<=? x end))))))
+($:: ($whitespace)
+     (@skip (@pred char-whitespace?)))
 
-(define $string
-  (lambda (str)
-    (let ([$char (lambda (c) ($item (lambda (x) (char=? x c))))])
-      (apply @seq (map $char (string->list str))))))
+($:: ($comment)
+     (@skip (@cat (@~ *comment-start*)
+                  (@* (@pred char-not-newline?)))))
 
-(define $option
-  (lambda strs
-    (apply @opt (map $string strs))))
+;; number ::= ("-"|"+")? <digit>+ ("." <digit>+)?
+($:: ($number)
+     (@group 'number
+       (@cat (@? (@opt (@~ "-") (@~ "+")))
+             (@+ ($digit))
+             (@? (@cat (@~ ".") (@+ ($digit)))))
+       chars->number))
 
-(define $compound
-  (lambda (parser tag compound-func)
-    (@decor parser identity
-      (lambda (k-succ) (lambda (v) (k-succ (token-compound v compound-func))))
-      (lambda (k-fail) (lambda (v) (k-fail (error-make v tag)))))))
+;; identifier ::= <letter> (<letter>|<digit>|"-"|"_"|">"|"<")* ("?"|"!")?
+($:: ($identifier)
+     (@group 'identifier
+       (@cat ($letter)
+             (@* (@opt ($letter) ($digit) (@~ "-") (@~ "_") (@~ ">") (@~ "<")))
+             (@? (@opt (@~ "?") (@~ "!"))))
+       list->string))
 
-(define $not
-  (lambda (parser)
-    (lambda (val k-succ k-fail)
-      (parser val 
-        (lambda (v) (k-fail v))
-        (lambda (v) (if (null? (Value-rests v)) (k-fail v) (k-succ (char-next v))))))))
+;; symbol ::= "->"
+($:: ($symbol)
+     (@group 'symbol
+       (@opt (@~ "->"))
+       list->string))
 
-;; ----- lexical -----
-(define $letter
-  (let ([$lower ($range #\a #\z)] [$upper ($range #\A #\Z)])
-    (@opt $lower $upper)))
+;; any ::= <any>
+($:: ($any)
+     (@group 'any
+       (@pred (lambda (t) #t))
+       (pipe list list->string)))
 
-(define $digit
-  ($range #\0 #\9))
+;; tokens ::= (<whitespace>|<comment>|<identifier>|<number>|<symbol>|<any>)*
+($:: ($tokens)
+     (@* (@opt ($whitespace)
+               ($comment)
+               ($identifier)
+               ($number)
+               ($symbol)
+               ($any))))
 
-;whitespace ::= <whitespace>
-(define $whitespace
-  ($compound ($item char-whitespace?) '$whitespace content->skip))
+;; ===== helper ===== ;;
+(define index-inc
+  (lambda (idx c)
+    (match idx
+      [(Index line cursor)
+       (if (char=? c #\newline)
+         (Index (add1 line) 1)
+         (Index line (add1 cursor)))])))
 
-;comment ::= '#' <!'\n'>*
-(define $comment
-  ($compound (@seq ($string "#") (@* ($not ($string "\n")))) '$comment content->skip))
+(define char-not-newline?
+  (lambda (c)
+    (not (char=? c #\newline))))
 
-;number ::= <'-' | '+'>? digit+ <'.' digit+>?
-(define $number
-  (let ([head (@? ($option "-" "+"))]
-        [body (@+ $digit)]
-        [tail (@? (@seq ($string ".") (@+ $digit)))])
-    ($compound (@seq head body tail) '$number content->number)))
+(define generate-parse-error
+  (lambda (tag)
+    (match *parse-error*
+      [(cons chs idx)
+       (set! *shown-error* 
+         (format "error - ~a[~a:~a]: '~a' is not satisfied~n" tag (Index-line idx) (Index-cursor idx) (car chs)))]
+      [else
+       (set! *shown-error*
+         (format "error - ~a: tokens is empty~n" tag))])))
 
-;identifier ::= letter <letter | digit | '-' | '_' | '<' | '>'>* <'?' | '!'>?
-(define $identifier
-  (let ([head $letter]
-        [body (@* (@opt $letter $digit ($option "-" "_" "<" ">")))]
-        [tail (@? ($option "?" "!"))])
-    ($compound (@seq head body tail) '$identifier content->symbol)))
+;; ===== test ===== ;;
+(define-syntax @test
+  (syntax-rules ()
+    [(_ p strs ...)
+     (for-each
+       (lambda (str) 
+         (init-parse-error!)
+         (init-shown-error!)
+         (printf "cases: \"~a\" -> ~a~n" str (quote p))
+         (p (Stream (string->list str) (Index 1 1))
+            (lambda (t stm) 
+              (if (not t)
+                (display *shown-error*)
+                (printf "parse: ~a~nrests: ~a~n" t (Stream-chars stm))
+                )))
+         (printf "~n"))
+       (list strs ...))]))
 
-;symbol ::= "->"
-(define $symbol
-  ($compound ($option "->") '$symbol content->symbol))
+;(@test ($digit) "" "1" "a")
+;(@test ($letter) "" "1" "a")
+;(@test ($whitespace) "" " " "\t" "\n" "a")
+;(@test ($comment) "" "a#" "#a" "#\na" "##")
+;(@test ($number) "" "a" "1" "+0.1" "-00.0230" "00123.1230" "-+0.1" "+12..0")
+;(@test ($identifier) "" "a" "1" "var1" "-var" "_var" "v1ar->a" "v--->>aa" "cond!" "else?" "test?!")
+;(@test ($symbol) "" "-" ">" "->" "-->" "->>")
+;(@test ($any) "" "-" ">" "->" "-->" "->>")
+;(@test ($identifier) "1")
+;(scan
+;"let def-var = func (param-var1, ~param-var2, *param-var3) {
+;  let var0 = nil, var1 = expr1, var2 = var1, var3 = 1, var4 = true, var5 = false # let binding
+;  func-expr(param-var1 = param-val1, param-var2, var3, var4, var5) # func-call
+;  cond { cond-expr -> { expr-true } else -> { expr-else } } # cond-expr
+;}"
+;  (lambda (ts)
+;    (pretty-display ts)))
 
-;any ::= <char>
-(define $any
-  ($compound ($item (lambda (x) #t)) '$any content->symbol))
-
-;tokens ::= <whitespace | comment | number | identifier | symbol | any>*
-(define $tokens
-  (@* (@opt $whitespace $comment $number $identifier $symbol $any)))
-
-;; ----- test -----
-(define $->number
-  (lambda (parser)
-    ($compound parser '$->number content->number)))
-
-(define $->symbol
-  (lambda (parser)
-    ($compound parser '$->symbol content->symbol)))
-
-(define $test-print-tokens
-  (lambda (value)
-    (let ([tokens (reverse (Value-tokens value))] [rests (Value-rests value)])
-      (printf "tokens: ~a~nrests: ~a~n" tokens rests))))
-
-(define $test-print-errors
-  (lambda (value)
-    (let ([errors (Value-errors value)] [rests (Value-rests value)])
-      (printf "errors: ~a~nrests: ~a~n" errors rests))))
-
-(define $test
-  (lambda (parser . strs)
-    (define (loop str)
-      (printf "case: \"~a\"~n" str)
-      (parser (value-make str) $test-print-tokens $test-print-errors)
-      (printf "~n"))
-    (for-each loop strs)))
-
-;($test ($->symbol $letter) "a" "A")
-;($test ($->number $digit) "a" "1")
-;($test $number "1" "+01230" "-00.1230" "1a2" "a12" "12a" "+a12" "00.a" "-0.1a" "00..0012")
-;($test ($->symbol ($string "你好")) "你好不" "你不好")
