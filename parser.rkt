@@ -4,6 +4,7 @@
 (require "lexical.rkt")
 (require "utils.rkt")
 
+;; ===== struct ===== ;;
 (struct Program [exprs index] #:transparent)
 (struct Expr [expr index] #:transparent)
 (struct Num [val] #:transparent)
@@ -12,31 +13,34 @@
 (struct Func [vars body] #:transparent)
 (struct Call [func vars] #:transparent)
 
+;; ===== data ===== ;;
 (define *keywords* '("let" "func" "cond" "else"))
+(define *shown-error* "")
 
-(define report-parse-error
-  (lambda (tag t)
-    (match t
-      [(Token val (Index line cursor))
-       (error tag "[~a:~a]: '~a' is not satisfied" line cursor val)]
-      [else
-       (error tag "'~a' is not a token" t)])))
+(define parse
+  (lambda (text cont)
+    (scan text
+      (lambda (ts)
+        (($program) ts
+          (lambda (ast ts)
+            (if (or (pair? ts) (not ast))
+              (display *shown-error*)
+              (cont ast))))))))
 
-;(define report-empty-error
-;  (lambda (tag)
-;    (error tag "tokens is empty")))
-
+;; ===== func parser ===== ;;
 (@:: (@~ str)
      (lambda (ts cont)
        (if (null? ts)
-         (cont #f ts)
+         (begin (set-empty-error! '@~)
+                (cont #f ts))
          (match (car ts)
            [(Token text idx)
             (if (equal? text str)
               (cont idx (cdr ts))
               (cont #f ts))]
            [else
-            (report-parse-error '@~ (car ts))]))))
+            (set-not-token-error! '@~ (car ts))
+            (cont #f ts)]))))
 
 (@:: (@_ str)
      (@skip (@~ str)))
@@ -44,26 +48,35 @@
 (@:: (@number func)
      (lambda (ts cont)
        (if (null? ts)
-         (cont #f ts)
+         (begin (set-empty-error! '@number)
+                (cont #f ts))
          (match (car ts)
-           [(Token num idx) 
-            (if (number? num)
-              (cont (func num idx) (cdr ts))
+           [(Token val idx) 
+            (if (number? val)
+              (cont (func val idx) (cdr ts))
               (cont #f ts))]
-           [else (report-parse-error 'number (car ts))]))))
+           [else 
+            (set-not-token-error! '@number (car ts))
+            (cont #f ts)]))))
 
 (@:: (@identifier func)
      (lambda (ts cont)
        (if (null? ts)
-         (cont #f ts)
+         (begin (set-empty-error! '@identifier)
+                (cont #f ts))
          (match (car ts)
-           [(Token text idx) 
-            (if (char-alphabetic? (string-ref text 0))
-              (if (member text *keywords*)
-                (report-parse-error 'identifier (car ts))
-                (cont (func (string->symbol text) idx) (cdr ts)))
+           [(Token val (Index line cursor)) 
+            (if (string? val)
+              (if (char-alphabetic? (string-ref val 0))
+                (if (member val *keywords*)
+                  (begin (set-parse-error! (format "@identifier - [~a:~a]: '~a' is a keyword~n" line cursor val)) 
+                         (cont #f ts))
+                  (cont (func (string->symbol val) (Index line cursor)) (cdr ts)))
+                (cont #f ts))
               (cont #f ts))]
-           [else (report-parse-error 'identifier (car ts))]))))
+           [else 
+            (set-not-token-error! '@identifier (car ts))
+            (cont #f ts)]))))
 
 (@:: (@.* p sep)
      (@? (@.+ p sep)))
@@ -71,38 +84,32 @@
 (@:: (@.+ p sep)
      (@cat p (@* (@cat (@skip sep) p))))
 
-($:: ($number)
-     (@number (lambda (num idx) num)))
-
-($:: ($identifier)
-     (@identifier (lambda (id idx) id)))
-
-; program ::= <expr>+
+;; ===== parser ===== ;;
 ($:: ($program)
      (@succ (@+ ($expr))
        (lambda (exprs)
          (@const (Program exprs (Expr-index (car exprs)))))))
 
 ($:: ($expr)
-     (@opt ($expr-num) ($expr-var) ($expr-let) ($expr-func) ($expr-call)))
+     (@alt ($expr-num)
+           ($expr-var)
+           ($expr-let)
+           ($expr-func)
+           ($expr-call)))
 
-; multi-expr ::= { <Expression>* }
 ($:: ($expr-multi)
      (@cat (@_ "{") (@* ($expr)) (@_ "}")))
 
-; expr ::= <number>
 ($:: ($expr-num)
      (@number 
        (lambda (num idx)
          (Expr (Num num) idx))))
 
-; expr ::= <identifier>
 ($:: ($expr-var)
      (@identifier
        (lambda (id idx)
          (Expr (Var id) idx))))
 
-; expr ::= let <Identifier = Expression>+(,)
 ($:: ($expr-let)
      (@succ (@seq (@~ "let")
                   (@.+ ($expr-let-bind) (@_ ",")))
@@ -117,7 +124,6 @@
 ($:: ($expr-let-bind)
      (@cat ($identifier) (@_ "=") ($expr)))
 
-; expr ::= func ( <Identifier>*(,) ) MutliExpression
 ($:: ($expr-func)
      (@succ (@seq (@~ "func") ($expr-func-vars) ($expr-multi))
             (lambda (ts)
@@ -128,28 +134,42 @@
 ($:: ($expr-func-vars)
      (@cat (@_ "(") (@.* ($identifier) (@_ ",")) (@_ ")")))
 
-; expr ::= Expression <( <Expression>*(,) )>+
 ($:: ($expr-call)
-     (@succ (@seq ($expr-call-func) (@+ ($expr-call-args)))
+     (@succ (@seq ($expr-call-func) ($expr-call-args))
             (lambda (ts)
               (match ts
-                [(list func argss)
-                 (@const (foldl (lambda (args func) (Expr (Call func args) (Expr-index func))) func argss))]))))
+                [(list func args)
+                 (@const (Expr (Call func args) (Expr-index func)))]))))
 
 ($:: ($expr-call-func)
-     (@opt ($expr-var) ($expr-func)))
+     (@alt ($expr-var) ($expr-func) ($expr-call)))
 
 ($:: ($expr-call-args)
-     (@flat (@seq (@_ "(") (@.* ($expr) (@_ ",")) (@_ ")"))))
+     (@succ (@seq (@~ "(") (@.* ($expr) (@_ ",")) (@~ ")"))
+            (lambda (v)
+              (match v
+                [(list _ args _) (@const args)]))))
 
-;(define parse
-;  (lambda (text)
-;    (scan text
-;      (lambda (ts)
-;        (($program) ts
-;          (lambda (ast)
-;            (pretty-display ast)))))))
+($:: ($number)
+     (@number (lambda (num idx) num)))
 
+($:: ($identifier)
+     (@identifier (lambda (id idx) id)))
+
+;; ===== helper ===== ;;
+(define set-parse-error!
+  (lambda (msg)
+    (set! *shown-error* msg)))
+
+(define set-empty-error!
+  (lambda (tag)
+    (set! *shown-error* (format "~a: tokens is empty~n" tag))))
+
+(define set-not-token-error!
+  (lambda (tag t)
+    (set! *shown-error* (format "~a: '~a' is not a token~n" tag t))))
+
+;; ===== test ===== ;;
 (define-syntax @test
   (syntax-rules ()
     [(_ p strs ...)
@@ -160,7 +180,7 @@
                (lambda (ts)
                  (p ts 
                     (lambda (ast ts)
-                      (pretty-display ast)))))
+                      (printf "parse: ~a~nrests: ~a~n" ast ts)))))
          (printf "~n"))
        (list strs ...))]))
 
@@ -173,11 +193,18 @@
 ;(@test ($expr-let) "let var1 = 10" "let var1 = 10, var2 = 20" "let" "let var1, var2 = 20" "let var1 = 10 var2 = 20")
 ;(@test ($expr-func) "func" "func var1, var2 {}" "func (var1) {}" "func (var1 var2) {}" "func (var1, var2) {10 20}")
 ;(@test ($expr-call) "var1(var2)" "var1(var2, var3)(var4, var5)(var6, var7)" "var1(var2 var3)")
-;(parse
-;"
-;let def-var = func (param-var1, param-var2, param-var3) {
-;  let var0 = 1, var2 = var0, var3 = func (v1, v2) { add(v1, v2) }
-;  var3(var0, add(10, 20))
-;}
-;")
+;(@test ($program) "let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }")
+;(@test ($expr) "b")
+;(@test ($expr-multi) "{ b(c) }")
+;(parse "b(c)" (lambda (ast) (pretty-display ast)))
+(parse
+"
+let def-var = func (param-var1, param-var2, param-var3) {
+  let var0 = 1, var2 = var0, var3 = func (v1, v2) { add(v1, v2) }
+  var3(var0, add(10, 20))
+  var4(a)(b, c)
+}
+"
+(lambda (ast)
+  (pretty-display ast)))
 

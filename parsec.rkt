@@ -14,10 +14,20 @@
     [(_ (name) body)
      (define (name)
        (lambda (vs cont)
-         (if (store-get *store* (quote name) vs)
-           (cont #f vs)
-           (begin (store-set! *store* (quote name) vs #t)
-                  (body vs cont)))))]))
+         (let ([table (store-get *store* (quote name) vs)])
+           (if (not table)
+             (begin
+               (set! table (table-make))
+               (store-set! *store* (quote name) vs table)
+               (table-set-conts! table cont)
+               (body vs 
+                 (lambda v
+                   (unless (member v (table-get-vals table))
+                     (table-set-vals! table v)
+                     (for-each (lambda (k) (apply k v)) (table-get-conts table))))))
+             (begin
+               (table-set-conts! table cont)
+               (for-each (lambda (v) (apply cont v)) (table-get-vals table)))))))]))
 
 ;; ===== meta parser ===== ;;
 (@:: (@const x)
@@ -58,6 +68,10 @@
 (@:: (@opt . ps)
      (let ([loop (lambda (p a) (@fail p (lambda () a)))])
        (foldr loop (@error) ps)))
+
+(@:: (@alt . ps)
+     (lambda (vs cont)
+       (for-each (lambda (p) (p vs cont)) ps)))
 
 (@:: (@? p)
      (@opt p (@truth)))
@@ -103,6 +117,21 @@
         (set! sub-store (make-hasheq))
         (hash-set! store key1 sub-store))
       (hash-set! sub-store key2 val))))
+
+(define table-make
+  (lambda () (mcons '() '())))
+
+(define table-get-conts
+  (lambda (tbl) (mcar tbl)))
+
+(define table-set-conts!
+  (lambda (tbl cont) (set-mcar! tbl (cons cont (table-get-conts tbl)))))
+
+(define table-get-vals
+  (lambda (tbl) (mcdr tbl)))
+
+(define table-set-vals!
+  (lambda (tbl val) (set-mcdr! tbl (cons val (table-get-vals tbl)))))
 
 ;; ===== test ===== ;;
 (define-syntax @test
