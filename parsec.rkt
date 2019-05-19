@@ -3,75 +3,63 @@
 (provide (all-defined-out))
 (require "utils.rkt")
 
-;; ===== syntax ===== ;;
 (define-syntax @::
   (syntax-rules ()
-    [(_ kw body)
-     (define kw (lambda $ (apply body $)))]))
+    [(_ kw body ...)
+     (define kw (lambda $ (apply (let () body ...) $)))]))
 
 (define-syntax $::
   (syntax-rules ()
-    [(_ (name) body)
+    [(_ (name) body ...)
      (define (name)
-       (lambda (vs cont)
-         (let ([table (store-get *store* (quote name) vs)])
-           (if (not table)
-             (begin
-               (set! table (table-make))
-               (store-set! *store* (quote name) vs table)
-               (table-set-conts! table cont)
-               (body vs 
-                 (lambda v
-                   (unless (member v (table-get-vals table))
-                     (table-set-vals! table v)
-                     (for-each (lambda (k) (apply k v)) (table-get-conts table))))))
-             (begin
-               (table-set-conts! table cont)
-               (for-each (lambda (v) (apply cont v)) (table-get-vals table)))))))]))
+       (lambda (vs k-succ k-fail)
+         (let ([val (store-get *store* (quote name) vs)])
+           (cond [(not val)
+                  (store-set! *store* (quote name) vs (void))
+                  ((let () body ...) vs 
+                   (lambda $ (store-set! *store* (quote name) vs $)  (apply k-succ $))
+                   (lambda $ (store-set! *store* (quote name) vs #f) (apply k-fail $)))]
+                 [(void? val)
+                  (report-left-recursive-error (quote name) vs)]
+                 [else
+                  (apply k-succ val)]))))]))
 
-;; ===== meta parser ===== ;;
 (@:: (@const x)
-     (lambda (vals cont)
-       (cont x vals)))
+     (lambda (vs k-succ k-fail)
+       (k-succ x vs)))
 
 (@:: (@truth)
      (@const '()))
 
 (@:: (@error)
-     (lambda (vals cont)
-       (cont #f vals)))
+     (lambda (vs k-succ k-fail)
+       (k-fail #f vs)))
 
 (@:: (@succ p func)
-     (lambda (vals cont)
-       (p vals 
-         (lambda (val vals*)
-           (if (not val)
-             (cont #f vals)
-             ((func val) vals* cont))))))
+     (lambda (vs k-succ k-fail)
+       (p vs (lambda (v rs) ((func v) rs k-succ k-fail)) k-fail)))
 
 (@:: (@fail p func)
-     (lambda (vals cont)
-       (p vals
-         (lambda (val vals*)
-           (if (not val)
-             ((func) vals cont)
-             (cont val vals*))))))
+     (lambda (vs k-succ k-fail)
+       (p vs k-succ (lambda (e rs) ((func e rs) vs k-succ k-fail)))))
 
-(@:: (@cat . ps)
-     (@merge ps
-       (lambda (v vs) (if (list? v) (append v vs) (cons v vs)))))
+(@:: (@skip p)
+     (@succ p (lambda (v) (@const '()))))
+
+(@:: (@and p q func)
+     (@succ p (lambda (pv) (@succ q (lambda (qv) (@const (func pv qv)))))))
 
 (@:: (@seq . ps)
-     (@merge ps
-       (lambda (v vs) (cons v vs))))
+     (let ([bind (lambda (p a) (@and p a cons))])
+       (foldr bind (@const '()) ps)))
+
+(@:: (@cat . ps)
+     (let ([bind (lambda (p a) (@and p a pair-cons))])
+       (foldr bind (@const '()) ps)))
 
 (@:: (@opt . ps)
-     (let ([loop (lambda (p a) (@fail p (lambda () a)))])
-       (foldr loop (@error) ps)))
-
-(@:: (@alt . ps)
-     (lambda (vs cont)
-       (for-each (lambda (p) (p vs cont)) ps)))
+     (let ([bind (lambda (p a) (@fail p (lambda (e rs) a)))])
+       (foldr bind (@error) ps)))
 
 (@:: (@? p)
      (@opt p (@truth)))
@@ -80,28 +68,17 @@
      (@opt (@+ p) (@truth)))
 
 (@:: (@+ p)
-     (@cat p (@* p)))
+     (@and p (@* p) pair-cons))
 
-;; ===== func parser ===== ;;
-(@:: (@skip p)
-     (@succ p (lambda (t) (@const '()))))
+(@:: (@.* p sep)
+     (@? (@.+ p sep)))
 
-(@:: (@flat p)
-     (@succ p 
-       (lambda (v)
-         (if (list? v)
-           (@const (filter (lambda (x) (not (null? x))) v))
-           (@const (list v))))))
+(@:: (@.+ p sep)
+     (@and p (@* (@cat sep p))
+       (lambda (v vs)
+         (foldl (lambda (v a) (append a v)) (list v) vs))))
 
-(@:: (@merge ps func)
-     (let* ([loop-v (lambda (v vs) (@const (func v vs)))]
-            [loop-a (lambda (a v)  (@succ a (lambda (vs) (loop-v v vs))))]
-            [loop-p (lambda (p a)  (@succ p (lambda (v) (loop-a a v))))]
-            [cat-p (foldr loop-p (@const '()) ps)])
-       (lambda (vals cont)
-         (cat-p vals (lambda (val vals*) (if (not val) (cont #f vals) (cont val vals*)))))))
-
-;; ===== helper ===== ;;
+;--------- data ---------;
 (define *store* (make-hasheq))
 
 (define store-get
@@ -118,22 +95,15 @@
         (hash-set! store key1 sub-store))
       (hash-set! sub-store key2 val))))
 
-(define table-make
-  (lambda () (mcons '() '())))
+(define report-left-recursive-error
+  (lambda (tag vs)
+    (error tag "report-left-recursive-error: ~a~n~a~n" vs *store*)))
 
-(define table-get-conts
-  (lambda (tbl) (mcar tbl)))
+(define pair-cons
+  (lambda (p q)
+    (if (null? p) q (cons p q))))
 
-(define table-set-conts!
-  (lambda (tbl cont) (set-mcar! tbl (cons cont (table-get-conts tbl)))))
-
-(define table-get-vals
-  (lambda (tbl) (mcdr tbl)))
-
-(define table-set-vals!
-  (lambda (tbl val) (set-mcdr! tbl (cons val (table-get-vals tbl)))))
-
-;; ===== test ===== ;;
+;------- test -------;
 (define-syntax @test
   (syntax-rules ()
     [(_ p strs ...)
@@ -141,34 +111,28 @@
        (lambda (str) 
          (printf "cases: \"~a\" -> ~a~n" str (quote p))
          (p (string->list str)
-            (lambda (val vals) (printf "parse: ~a~nrests: ~a~n" val vals)))
+            (lambda (v rs) (printf "parse: ~s~nrests: ~s~n" v rs))
+            (lambda (e rs) (printf "error: ~s~nrests: ~s~n" e rs)))
          (printf "~n"))
        (list strs ...))]))
 
-;(@:: (@pred pred)
-;     (lambda (vals cont)
-;       (if (and (pair? vals) (pred (car vals)))
-;         (cont (car vals) (cdr vals))
-;         (cont #f vals))))
-
-;($:: ($digit)
-;     (@pred char-numeric?))
-
-;($:: ($expr)
-;     (@opt ($expr) ($digit)))
+(@:: (@pred pred)
+     (lambda (vs k-succ k-fail)
+       (if (and (pair? vs) (pred (car vs)))
+         (k-succ (car vs) (cdr vs))
+         (k-fail 'pred vs))))
 
 ;(@test (@const 10) "" "a" "12" "A23")
 ;(@test (@truth) "" "a" "12" "A23")
 ;(@test (@error) "" "a" "12" "A23")
 ;(@test (@pred char-alphabetic?) "" "a" "12" "A23")
-;(@test (@succ (@truth) (lambda (t) (@const 10))) "" "a" "12" "A23")
-;(@test (@fail (@error) (lambda () (@const 10))) "" "a" "12" "A23")
-;(@test (@seq (@const 10) (@const 20)) "" "a" "12" "A23")
+;(@test (@succ (@truth) (lambda (v) (@const 10))) "" "a" "12" "A23")
+;(@test (@fail (@error) (lambda (t rs) (@const 10))) "" "a" "12" "A23")
+;(@test (@seq (@pred char-alphabetic?) (@pred char-numeric?)) "" "a" "12" "A23" "ab34" "a3b4")
 ;(@test (@opt (@const 10) (@const 20)) "" "a" "12" "A23")
 ;(@test (@? (@pred char-alphabetic?)) "" "a" "12" "A23")
-;(@test (@* (@pred char-alphabetic?)) "" "a" "12" "A23" "ab34" "a3b4")
-;(@test (@+ (@pred char-alphabetic?)) "" "a" "12" "A23" "ab34" "a3b4")
-;(@test (@flat (@* (@pred char-alphabetic?))) "" "a" "12" "A23" "ab34" "a3b4")
-;(@test (@seq (@const 10) (@skip (@const 20)) (@const 30)) "" "a" "12" "A23" "ab34" "a3b4")
-;(@test ($expr) "10")
+;(@test (@* (@pred char-alphabetic?)) "" "a" "12" "A23" "ab34" "a3b4" "abc")
+;(@test (@+ (@pred char-alphabetic?)) "" "a" "12" "A23" "ab34" "a3b4" "abc")
+;(@test (@.* (@pred char-alphabetic?) (@pred char-numeric?)) "" "a" "1a2" "A23" "ab34" "a3b4" "a3b4c")
+;(@test (@.+ (@pred char-alphabetic?) (@pred char-numeric?)) "" "a" "1a2" "A23" "ab34" "a3b4" "a3b4c")
 

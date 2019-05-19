@@ -4,172 +4,163 @@
 (require "lexical.rkt")
 (require "utils.rkt")
 
-;; ===== struct ===== ;;
-(struct Program [exprs index] #:transparent)
-(struct Expr [expr index] #:transparent)
-(struct Num [val] #:transparent)
-(struct Var [val] #:transparent)
-(struct Let [vars exprs] #:transparent)
-(struct Func [vars body] #:transparent)
-(struct Call [func vars] #:transparent)
+; ------ struct ------ ;
+(struct AST                       []          #:transparent)
+(struct AST:Prgm        AST       [exprs]     #:transparent)
+(struct AST:Expr        AST       [index]     #:transparent)
+(struct AST:Expr:Num    AST:Expr  [val]       #:transparent)
+(struct AST:Expr:Var    AST:Expr  [val]       #:transparent)
+(struct AST:Expr:Let    AST:Expr  [binds]     #:transparent)
+(struct AST:Expr:Func   AST:Expr  [vars body] #:transparent)
+(struct AST:Expr:Call   AST:Expr  [func vars] #:transparent)
 
-;; ===== data ===== ;;
-(define *keywords* '("let" "func" "cond" "else"))
-(define *shown-error* "")
+(struct Error [tag message] #:transparent)
 
-(define parse
-  (lambda (text cont)
-    (scan text
-      (lambda (ts)
-        (($program) ts
-          (lambda (ast ts)
-            (if (or (pair? ts) (not ast))
-              (display *shown-error*)
-              (cont ast))))))))
+; ------ data ------- ;
+(define *keywords* (list "let" "func" "cond" "else"))
 
-;; ===== func parser ===== ;;
+; ------ parser ------ ;
+($:: ($program)
+     (lambda (ts k-succ k-fail)
+       (let loop ([ts ts] [exprs '()])
+         (($expr) ts
+          (lambda (t rs)
+            (let ([exprs (cons t exprs)])
+              (if (null? rs)
+                (k-succ (AST:Prgm (reverse exprs)) rs)
+                (loop rs exprs))))
+          k-fail))))
+
+($:: ($expr)
+     (@catch 
+       (@opt 
+         ($expr-let)
+         ($expr-func)
+         ($expr-call)
+         ($expr-var)
+         ($expr-num)
+         )
+       (error-handle 'expression)))
+
+($:: ($expr-num)
+     (@number AST:Expr:Num))
+
+($:: ($expr-var)
+     (@identifier AST:Expr:Var))
+
+($:: ($expr-let)
+     ($:: ($expr-let-begin)
+          (@~ "let"))
+     ($:: ($expr-let-body)
+          (@catch
+            (@.+ (@cat ($identifier) (@_ "=") ($expr))
+                 (@_ ","))
+            (error-handle 'expr-let)))
+     (@succ
+       (@seq ($expr-let-begin) ($expr-let-body))
+       (lambda (ts)
+         (@const (apply AST:Expr:Let ts)))))
+
+($:: ($expr-func)
+     ($:: ($expr-func-begin)
+          (@~ "func"))
+     ($:: ($expr-func-vars)
+          (@catch
+            (@cat (@_ "(") (@.* ($identifier) (@_ ",")) (@_ ")"))
+            (error-handle 'expr-func)))
+     ($:: ($expr-func-body)
+          (@catch
+            (@seq (@_ "{") (@* ($expr)) (@_ "}"))
+            (error-handle 'expr-func)))
+     (@succ 
+       (@seq ($expr-func-begin) ($expr-func-vars) ($expr-func-body))
+       (lambda (ts)
+         (match ts
+           [(list idx (list vars) (list _ body _))
+            (@const (AST:Expr:Func idx vars body))]))))
+
+($:: ($expr-call)
+     ($:: ($expr-call-func)
+          (@try 'expr-call-func
+            (@opt ($expr-var)
+                  ($expr-func))))
+     ($:: ($expr-call-args)
+          (@catch
+            (@seq (@_ "(") (@.* ($expr) (@_ ",")) (@_ ")"))
+            (error-handle 'expr-call)))
+     (@succ 
+       (@seq ($expr-call-func) ($expr-call-args))
+       (lambda (ts)
+         (match ts
+           [(list func (list _ args _))
+            (@const (AST:Expr:Call (AST:Expr-index func) func args))]))))
+
+($:: ($number)
+     (@number (lambda (idx num) num)))
+
+($:: ($identifier)
+     (@identifier (lambda (idx id) id)))
+
+; ------ func parser ------ ;
+(@:: (@try tag p)
+     (lambda (vs k-succ k-fail)
+       (p vs k-succ (lambda (e rs) (k-fail (Error tag #f) rs)))))
+
+(@:: (@catch p func)
+     (lambda (vs k-succ k-fail)
+       (p vs k-succ (lambda (e rs) (k-fail (func e rs) rs)))))
+
 (@:: (@~ str)
-     (lambda (ts cont)
-       (if (null? ts)
-         (begin (set-empty-error! '@~)
-                (cont #f ts))
-         (match (car ts)
-           [(Token text idx)
-            (if (equal? text str)
-              (cont idx (cdr ts))
-              (cont #f ts))]
-           [else
-            (set-not-token-error! '@~ (car ts))
-            (cont #f ts)]))))
+     (lambda (ts k-succ k-fail)
+       (match ts
+         [(list (Token idx (? (curry equal? str) val)) rs ...)
+          (k-succ idx rs)]
+         [_ (k-fail (Error str "") ts)])))
 
 (@:: (@_ str)
      (@skip (@~ str)))
 
 (@:: (@number func)
-     (lambda (ts cont)
-       (if (null? ts)
-         (begin (set-empty-error! '@number)
-                (cont #f ts))
-         (match (car ts)
-           [(Token val idx) 
-            (if (number? val)
-              (cont (func val idx) (cdr ts))
-              (cont #f ts))]
-           [else 
-            (set-not-token-error! '@number (car ts))
-            (cont #f ts)]))))
+     (lambda (ts k-succ k-fail)
+       (match ts
+         [(list (Token idx (? number? val)) rs ...)
+          (k-succ (func idx val) rs)]
+         [_ (k-fail (Error 'number "") ts)])))
 
 (@:: (@identifier func)
-     (lambda (ts cont)
-       (if (null? ts)
-         (begin (set-empty-error! '@identifier)
-                (cont #f ts))
-         (match (car ts)
-           [(Token val (Index line cursor)) 
-            (if (string? val)
-              (if (char-alphabetic? (string-ref val 0))
-                (if (member val *keywords*)
-                  (begin (set-parse-error! (format "@identifier - [~a:~a]: '~a' is a keyword~n" line cursor val)) 
-                         (cont #f ts))
-                  (cont (func (string->symbol val) (Index line cursor)) (cdr ts)))
-                (cont #f ts))
-              (cont #f ts))]
-           [else 
-            (set-not-token-error! '@identifier (car ts))
-            (cont #f ts)]))))
+     (lambda (ts k-succ k-fail)
+       (match ts
+         [(list (Token idx (? identifier? val)) rs ...)
+          (k-succ (func idx (string->symbol val)) rs)]
+         [_ (k-fail (Error 'identifier "") ts)])))
 
-(@:: (@.* p sep)
-     (@? (@.+ p sep)))
+; ------ helper ------ ;
+(define identifier?
+  (lambda (val)
+    (and (string? val)
+         (char-alphabetic? (string-ref val 0))
+         (not (member val *keywords*)))))
 
-(@:: (@.+ p sep)
-     (@cat p (@* (@cat (@skip sep) p))))
+(define report-empty-error
+  (lambda (kind err)
+    (let ([tag (if (not err) kind (Error-tag err))])
+      (Error kind (format "expect '~a' but tokens was ended" tag)))))
 
-;; ===== parser ===== ;;
-($:: ($program)
-     (@succ (@+ ($expr))
-       (lambda (exprs)
-         (@const (Program exprs (Expr-index (car exprs)))))))
+(define report-parse-error
+  (lambda (kind err val line cursor)
+    (let ([tag (if (not err) kind (Error-tag err))])
+      (Error kind (format "~a:~a: expect '~a' but found '~a'" line cursor tag val)))))
 
-($:: ($expr)
-     (@alt ($expr-num)
-           ($expr-var)
-           ($expr-let)
-           ($expr-func)
-           ($expr-call)))
+(define error-handle
+  (lambda (kind)
+    (lambda (err rs)
+      (if (null? rs)
+        (report-empty-error kind err)
+        (match (car rs)
+          [(Token (Index line cursor) val)
+           (report-parse-error kind err val line cursor)])))))
 
-($:: ($expr-multi)
-     (@cat (@_ "{") (@* ($expr)) (@_ "}")))
-
-($:: ($expr-num)
-     (@number 
-       (lambda (num idx)
-         (Expr (Num num) idx))))
-
-($:: ($expr-var)
-     (@identifier
-       (lambda (id idx)
-         (Expr (Var id) idx))))
-
-($:: ($expr-let)
-     (@succ (@seq (@~ "let")
-                  (@.+ ($expr-let-bind) (@_ ",")))
-            (lambda (ts)
-              (match ts
-                [(list idx bind)
-                 (let loop ([bind bind] [vars '()] [exprs '()])
-                   (cond [(null? bind) (@const (Expr (Let (reverse vars) (reverse exprs)) idx))]
-                         [(symbol? (car bind)) (loop (cdr bind) (cons (car bind) vars) exprs)]
-                         [else (loop (cdr bind) vars (cons (car bind) exprs))]))]))))
-
-($:: ($expr-let-bind)
-     (@cat ($identifier) (@_ "=") ($expr)))
-
-($:: ($expr-func)
-     (@succ (@seq (@~ "func") ($expr-func-vars) ($expr-multi))
-            (lambda (ts)
-              (match ts
-                [(list idx vars body)
-                 (@const (Expr (Func vars body) idx))]))))
-
-($:: ($expr-func-vars)
-     (@cat (@_ "(") (@.* ($identifier) (@_ ",")) (@_ ")")))
-
-($:: ($expr-call)
-     (@succ (@seq ($expr-call-func) ($expr-call-args))
-            (lambda (ts)
-              (match ts
-                [(list func args)
-                 (@const (Expr (Call func args) (Expr-index func)))]))))
-
-($:: ($expr-call-func)
-     (@alt ($expr-var) ($expr-func) ($expr-call)))
-
-($:: ($expr-call-args)
-     (@succ (@seq (@~ "(") (@.* ($expr) (@_ ",")) (@~ ")"))
-            (lambda (v)
-              (match v
-                [(list _ args _) (@const args)]))))
-
-($:: ($number)
-     (@number (lambda (num idx) num)))
-
-($:: ($identifier)
-     (@identifier (lambda (id idx) id)))
-
-;; ===== helper ===== ;;
-(define set-parse-error!
-  (lambda (msg)
-    (set! *shown-error* msg)))
-
-(define set-empty-error!
-  (lambda (tag)
-    (set! *shown-error* (format "~a: tokens is empty~n" tag))))
-
-(define set-not-token-error!
-  (lambda (tag t)
-    (set! *shown-error* (format "~a: '~a' is not a token~n" tag t))))
-
-;; ===== test ===== ;;
+;--------- test ----------;
 (define-syntax @test
   (syntax-rules ()
     [(_ p strs ...)
@@ -177,34 +168,40 @@
        (lambda (str) 
          (printf "cases: \"~a\" -> ~a~n" str (quote p))
          (scan str
-               (lambda (ts)
-                 (p ts 
-                    (lambda (ast ts)
-                      (printf "parse: ~a~nrests: ~a~n" ast ts)))))
+           (lambda (ts)
+             (p ts
+                (lambda (val ts) (printf "parse: ~a~nrests: ~a~n" val ts))
+                (lambda (err ts) (printf "error: ~a~nrests: ~a~n" err ts)))))
          (printf "~n"))
        (list strs ...))]))
 
 ;(@test (@~ "let") "" "let" "func" "test")
 ;(@test (@_ "let") "" "let" "func" "test")
-;(@test (@.* (@~ "let") (@~ ",")) "" "let" "let, let" "let,,let" "let,")
-;(@test (@.+ (@~ "let") (@~ ",")) "" "let" "let, let" "let,,let" "let,")
-;(@test ($expr-num) "10" "20")
-;(@test ($expr-var) "var1" "var2")
-;(@test ($expr-let) "let var1 = 10" "let var1 = 10, var2 = 20" "let" "let var1, var2 = 20" "let var1 = 10 var2 = 20")
-;(@test ($expr-func) "func" "func var1, var2 {}" "func (var1) {}" "func (var1 var2) {}" "func (var1, var2) {10 20}")
-;(@test ($expr-call) "var1(var2)" "var1(var2, var3)(var4, var5)(var6, var7)" "var1(var2 var3)")
-;(@test ($program) "let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }")
-;(@test ($expr) "b")
-;(@test ($expr-multi) "{ b(c) }")
-;(parse "b(c)" (lambda (ast) (pretty-display ast)))
-(parse
-"
-let def-var = func (param-var1, param-var2, param-var3) {
-  let var0 = 1, var2 = var0, var3 = func (v1, v2) { add(v1, v2) }
-  var3(var0, add(10, 20))
-  var4(a)(b, c)
-}
-"
-(lambda (ast)
-  (pretty-display ast)))
-
+;(@test ($expr-num) "" "10" "a" "20" "30b")
+;(@test ($expr-var) "" "var1" "10" "var2")
+;(@test ($expr-let) 
+;       "let" "var1 = 10, var2 = 20" "let var1, var2 = 20" "let var1 = 10 var2 = 20" "let var1 = 10,, var2 = 20"
+;       "let var1 = 10" "let var1 = 10, var2 = 20"
+;       )
+;(@test ($expr-func-begin)
+;       "" "fun" "func" "func1" "funn")
+;(@test ($expr-func-vars) 
+;       #;"var1" #;"(var1" #;"var1)" #;"(var1 var2)" #;"(var1, var2"
+;       "(var1)" "(var1, var2)")
+;(@test ($expr-func-body)
+;       #;"10" #;"{ 10" #;"10 }" #;"{ 10 , 20 }" #;"{ { 10 }" #;"{ 10 { }}"
+;       "{ }" "{ 10 }" "{ 10 20 }")
+;(@test ($expr-func)
+;       "func" "fun (var1, var2) {}" "func (var1 var2) {}" "func (var1, var2 {}" "func (var1, var2) { 10 { 20 }" 
+;       "func (var1, var2) { }" "func (var1, var2) { 10 20 }")
+;(@test ($expr-call-func) 
+;        "10" "func (var1 var2) {}"
+;        "var1" "func (var1, var2) {}")
+;(@test ($expr-call-args)
+;       "var" "(var" "var)" "(var1 var2)" "(var1,, var2)" "(, var2)" "(var1, )" "(,)"
+;       "()" "(var1)" "(var1, var2)")
+;(@test ($expr-call)
+;       "" "10" "func (var1, var2) { 10 } (var2, var3)")
+;(@test ($program) 
+;       "" "a" "10" "func" "let a = 10 b = 10" "var(10 20)"
+;       "let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }")
