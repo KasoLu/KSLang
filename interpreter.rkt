@@ -3,12 +3,14 @@
 (require "lexical.rkt")
 (require "parser.rkt")
 
-(struct Val            []               #:transparent)
-(struct Val:Nil   Val  []               #:transparent)
-(struct Val:Num   Val  [val]            #:transparent)
-(struct Val:Bool  Val  [val]            #:transparent)
-(struct Val:Func  Val  [vars body env]  #:transparent)
-(struct Val:Void  Val  []               #:transparent)
+(struct Val                         []                    #:transparent)
+(struct Val:Nil           Val       []                    #:transparent)
+(struct Val:Void          Val       []                    #:transparent)
+(struct Val:Num           Val       [val]                 #:transparent)
+(struct Val:Bool          Val       [val]                 #:transparent)
+(struct Val:Func          Val       []                    #:transparent)
+(struct Val:Func:Builtin  Val:Func  [func]                #:transparent)
+(struct Val:Func:Externs  Val:Func  [vars body env]       #:transparent)
 
 (struct Env [table prev] #:transparent)
 
@@ -23,7 +25,7 @@
   (lambda (prgm fail cont)
     (match prgm
       [(AST:Prgm exprs)
-       (let loop ([exprs exprs] [env (env-init)] [val (Val:Nil)])
+       (let loop ([exprs exprs] [env (env-init!)] [val (Val:Nil)])
          (if (null? exprs)
            (cont val)
            (value-of-expr (car exprs) env fail
@@ -38,7 +40,7 @@
       [(AST:Expr:Var idx var)
        (cont (env-apply env var idx))]
       [(AST:Expr:Func _ vars body)
-       (cont (Val:Func vars body env))]
+       (cont (Val:Func:Externs vars body env))]
       [(AST:Expr:Let _ binds)
        (let ([tbl (env->table env)])
          (let loop ([binds binds])
@@ -64,7 +66,7 @@
 (define value-of-call
   (lambda (func args fail cont)
     (match func
-      [(Val:Func vars body env)
+      [(Val:Func:Externs vars body env)
        (let ([tbl (table-make)])
          (for-each (curry table-update! tbl) vars args)
          (let loop ([body body] [val (Val:Nil)])
@@ -72,7 +74,9 @@
              (cont val)
              (value-of-expr (car body) (env-extend env tbl) fail
                (lambda (val)
-                 (loop (cdr body) val))))))])))
+                 (loop (cdr body) val))))))]
+      [(Val:Func:Builtin func)
+       (func args fail cont)])))
 
 ; ----- env ----- ;
 (define table-make
@@ -82,8 +86,14 @@
   (lambda (tbl key val)
     (hash-set! tbl key val)))
 
-(define env-init
-  (lambda () (Env (table-make) (void))))
+(define env-init!
+  (lambda () 
+    (let ([tbl (table-make)])
+      (table-update! tbl 'add add-func)
+      (table-update! tbl 'sub sub-func)
+      (table-update! tbl 'mul mul-func)
+      (table-update! tbl 'div div-func)
+      (Env tbl (void)))))
 
 (define env-extend
   (lambda (env tbl)
@@ -106,6 +116,27 @@
       (error 'env->table "env is empty")
       (Env-table env))))
 
+; ----- built-in ------ ;
+(define add-func
+  (Val:Func:Builtin
+    (lambda (args fail cont)
+      (cont (Val:Num (apply + (map Val:Num-val args)))))))
+
+(define sub-func
+  (Val:Func:Builtin
+    (lambda (args fail cont)
+      (cont (Val:Num (apply - (map Val:Num-val args)))))))
+
+(define mul-func
+  (Val:Func:Builtin
+    (lambda (args fail cont)
+      (cont (Val:Num (apply * (map Val:Num-val args)))))))
+
+(define div-func
+  (Val:Func:Builtin
+    (lambda (args fail cont)
+      (cont (Val:Num (apply / (map Val:Num-val args)))))))
+
 ; ------ test ------ ;
 (define-syntax test
   (syntax-rules ()
@@ -123,5 +154,5 @@
   "10" 
   "var1" 
   "let a = 10, b = var2" 
-  "let a = 10, b = func (a, b) { 20 }
+  "let a = 10, b = func (a, b) { add(a, b) }
    b(1, 2)")
