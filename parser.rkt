@@ -4,6 +4,8 @@
 (require "lexical.rkt")
 (require "utils.rkt")
 
+(provide parse (all-defined-out))
+
 ; ------ struct ------ ;
 (struct AST                       []          #:transparent)
 (struct AST:Prgm        AST       [exprs]     #:transparent)
@@ -19,6 +21,15 @@
 ; ------ data ------- ;
 (define *keywords* (list "let" "func" "cond" "else"))
 
+; ------ func ------- ;
+(define parse
+  (lambda (tokens cont)
+    (scan tokens
+      (lambda (ts)
+        (($program) ts
+         (lambda (ast rs) (cont ast))
+         (lambda (err rs) (error (Error-message err))))))))
+
 ; ------ parser ------ ;
 ($:: ($program)
      (lambda (ts k-succ k-fail)
@@ -33,14 +44,14 @@
 
 ($:: ($expr)
      (@catch 
-       (@opt 
+       (@opt
          ($expr-let)
          ($expr-func)
          ($expr-call)
          ($expr-var)
          ($expr-num)
          )
-       (error-handle 'expression)))
+       (error-handle 'throw 'expression)))
 
 ($:: ($expr-num)
      (@number AST:Expr:Num))
@@ -55,7 +66,7 @@
           (@catch
             (@.+ (@cat ($identifier) (@_ "=") ($expr))
                  (@_ ","))
-            (error-handle 'expr-let)))
+            (error-handle 'abort 'expr-let)))
      (@succ
        (@seq ($expr-let-begin) ($expr-let-body))
        (lambda (ts)
@@ -67,11 +78,11 @@
      ($:: ($expr-func-vars)
           (@catch
             (@cat (@_ "(") (@.* ($identifier) (@_ ",")) (@_ ")"))
-            (error-handle 'expr-func)))
+            (error-handle 'abort 'expr-func)))
      ($:: ($expr-func-body)
           (@catch
             (@seq (@_ "{") (@* ($expr)) (@_ "}"))
-            (error-handle 'expr-func)))
+            (error-handle 'abort 'expr-func)))
      (@succ 
        (@seq ($expr-func-begin) ($expr-func-vars) ($expr-func-body))
        (lambda (ts)
@@ -87,7 +98,7 @@
      ($:: ($expr-call-args)
           (@catch
             (@seq (@_ "(") (@.* ($expr) (@_ ",")) (@_ ")"))
-            (error-handle 'expr-call)))
+            (error-handle 'throw 'expr-call)))
      (@succ 
        (@seq ($expr-call-func) ($expr-call-args))
        (lambda (ts)
@@ -141,24 +152,30 @@
          (char-alphabetic? (string-ref val 0))
          (not (member val *keywords*)))))
 
-(define report-empty-error
-  (lambda (kind err)
+(define handle-empty-error
+  (lambda (means kind err)
     (let ([tag (if (not err) kind (Error-tag err))])
-      (Error kind (format "expect '~a' but tokens was ended" tag)))))
+      (let ([msg (format "~a: expect '~a' but tokens was ended" kind tag)])
+        (match means
+          ['throw (Error kind msg)]
+          ['abort (error msg)])))))
 
-(define report-parse-error
-  (lambda (kind err val line cursor)
+(define handle-parse-error
+  (lambda (means kind err val line cursor)
     (let ([tag (if (not err) kind (Error-tag err))])
-      (Error kind (format "~a:~a: expect '~a' but found '~a'" line cursor tag val)))))
+      (let ([msg (format "~a:~a:~a: expect '~a' but found '~a'" kind line cursor tag val)])
+        (match means
+          ['throw (Error kind msg)]
+          ['abort (error msg)])))))
 
 (define error-handle
-  (lambda (kind)
+  (lambda (means kind)
     (lambda (err rs)
       (if (null? rs)
-        (report-empty-error kind err)
+        (handle-empty-error means kind err)
         (match (car rs)
           [(Token (Index line cursor) val)
-           (report-parse-error kind err val line cursor)])))))
+           (handle-parse-error means kind err val line cursor)])))))
 
 ;--------- test ----------;
 (define-syntax @test
@@ -205,3 +222,6 @@
 ;(@test ($program) 
 ;       "" "a" "10" "func" "let a = 10 b = 10" "var(10 20)"
 ;       "let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }")
+;(parse 
+;"let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }"
+;(lambda (ast) (pretty-display ast)))
