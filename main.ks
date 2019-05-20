@@ -1,18 +1,3 @@
-# Program ::= <Expression>+
-# Expression ::= Number | Boolean | Nil | Identifier
-# Expression ::= let Bindings
-# Expression ::= func ( FormalParams ) MutliExpression
-# Expression ::= cond { <<else | Expression> -> Expression>+ }
-# Expression ::= Expression ( Arguments )
-# MutliExpression ::= { <Expression>* }
-# Bindings ::= <Identifier = Expression>(,)+
-# FormalParams ::= <Identifier <? | ...>?>(,)*
-# Arguments ::= <<Identifier =>? Expression>(,)*
-# Number ::= <number>
-# Boolean ::= true | false
-# Nil ::= nil
-# Identifier ::= <identifier>(!<let | func | cond | else | nil | true | false>)
-
 # module name { var1, var2, var3 }
 # module name { ... }
 # import name { var1, var2, var3 }
@@ -60,4 +45,5 @@ let def-var = func (param-var1, param-var2, param-var3) {
   #   else -> expr
   # }
 }
+
 

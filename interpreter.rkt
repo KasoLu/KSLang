@@ -1,5 +1,6 @@
 #lang racket
 
+(require "utils.rkt")
 (require "lexical.rkt")
 (require "parser.rkt")
 
@@ -13,6 +14,10 @@
 (struct Val:Func:Externs  Val:Func  [vars body env]       #:transparent)
 
 (struct Env [table prev] #:transparent)
+
+(define run-file
+  (lambda (file)
+    (run (read-file file))))
 
 (define run
   (lambda (text)
@@ -29,54 +34,72 @@
          (if (null? exprs)
            (cont val)
            (value-of-expr (car exprs) env fail
-             (lambda (val)
+             (lambda (val env)
                (loop (cdr exprs) env val)))))])))
 
 (define value-of-expr
   (lambda (expr env fail cont)
     (match expr
       [(AST:Expr:Num _ num)
-       (cont (Val:Num num))]
+       (cont (Val:Num num) env)]
       [(AST:Expr:Var idx var)
-       (cont (env-apply env var idx))]
+       (cont (env-apply env var idx) env)]
       [(AST:Expr:Func _ vars body)
-       (cont (Val:Func:Externs vars body env))]
+       (cont (Val:Func:Externs vars body env) env)]
       [(AST:Expr:Let _ binds)
-       (let ([tbl (env->table env)])
+       (let ([env (env-extend env (table-make))])
          (let loop ([binds binds])
            (if (null? binds)
-             (cont (Val:Void))
+             (cont (Val:Void) env)
              (match (car binds)
                [(list var expr)
-                (value-of-expr expr (env-extend env tbl) fail
-                  (lambda (val)
-                    (table-update! tbl var val)
+                (value-of-expr expr env fail
+                  (lambda (val _)
+                    (table-update! (env->table env) var val)
                     (loop (cdr binds))))]))))]
       [(AST:Expr:Call idx func args)
        (value-of-expr func env fail
-         (lambda (func-val)
+         (lambda (func-val _)
            (let loop ([args args] [vals '()])
              (if (null? args)
-               (value-of-call func-val (reverse vals) fail cont)
+               (value-of-call func-val (reverse vals) env fail cont)
                (value-of-expr (car args) env fail
-                 (lambda (arg-val)
+                 (lambda (arg-val env)
                    (loop (cdr args) (cons arg-val vals))))))))]
-      )))
+      [(AST:Expr:Cond (Index line cursor) tests exprs)
+       (let loop ([tests tests] [exprs exprs])
+         (if (null? tests)
+           (error 'AST:Expr:Cond "[~a:~a] all tests were failed" line cursor)
+           (match (car tests)
+             [(AST:Expr:Var _ 'else)
+              (value-of-multi (car exprs) env fail cont)]
+             [else
+              (value-of-expr (car tests) env fail
+                (lambda (t _)
+                  (match t
+                    [(Val:Bool #t) (value-of-multi (car exprs) env fail cont)]
+                    [(Val:Bool #f) (loop (cdr tests) (cdr exprs))])))])))]
+      [else
+       123])))
 
 (define value-of-call
-  (lambda (func args fail cont)
+  (lambda (func args env fail cont)
     (match func
       [(Val:Func:Externs vars body env)
-       (let ([tbl (table-make)])
-         (for-each (curry table-update! tbl) vars args)
-         (let loop ([body body] [val (Val:Nil)])
-           (if (null? body)
-             (cont val)
-             (value-of-expr (car body) (env-extend env tbl) fail
-               (lambda (val)
-                 (loop (cdr body) val))))))]
+       (let ([env (env-extend env (table-make))])
+         (for-each (curry table-update! (env->table env)) vars args)
+         (value-of-multi body env fail cont))]
       [(Val:Func:Builtin func)
-       (func args fail cont)])))
+       (func args env fail cont)])))
+
+(define value-of-multi
+  (lambda (exprs env fail cont)
+    (let loop ([exprs exprs] [val (Val:Nil)])
+      (if (null? exprs)
+        (cont val env)
+        (value-of-expr (car exprs) env fail
+          (lambda (val _)
+            (loop (cdr exprs) val)))))))
 
 ; ----- env ----- ;
 (define table-make
@@ -93,6 +116,7 @@
       (table-update! tbl 'sub sub-func)
       (table-update! tbl 'mul mul-func)
       (table-update! tbl 'div div-func)
+      (table-update! tbl 'eq? eq?-func)
       (Env tbl (void)))))
 
 (define env-extend
@@ -119,23 +143,34 @@
 ; ----- built-in ------ ;
 (define add-func
   (Val:Func:Builtin
-    (lambda (args fail cont)
-      (cont (Val:Num (apply + (map Val:Num-val args)))))))
+    (lambda (args env fail cont)
+      (cont (Val:Num (apply + (map Val:Num-val args))) env))))
 
 (define sub-func
   (Val:Func:Builtin
-    (lambda (args fail cont)
-      (cont (Val:Num (apply - (map Val:Num-val args)))))))
+    (lambda (args env fail cont)
+      (cont (Val:Num (apply - (map Val:Num-val args))) env))))
 
 (define mul-func
   (Val:Func:Builtin
-    (lambda (args fail cont)
-      (cont (Val:Num (apply * (map Val:Num-val args)))))))
+    (lambda (args env fail cont)
+      (cont (Val:Num (apply * (map Val:Num-val args))) env))))
 
 (define div-func
   (Val:Func:Builtin
-    (lambda (args fail cont)
-      (cont (Val:Num (apply / (map Val:Num-val args)))))))
+    (lambda (args env fail cont)
+      (cont (Val:Num (apply / (map Val:Num-val args))) env))))
+
+(define eq?-func
+  (Val:Func:Builtin
+    (lambda (args env fail cont)
+      (cont (Val:Bool (apply equal? args)) env))))
+
+; ------ helper ------ ;
+(define error-report
+  (lambda (env exn)
+    (printf "err: ~a~n" (exn-message exn))
+    (pretty-display env)))
 
 ; ------ test ------ ;
 (define-syntax test
@@ -149,10 +184,13 @@
          (printf "~n"))
        (list text ...))]))
 
-(test 
-  "" 
-  "10" 
-  "var1" 
-  "let a = 10, b = var2" 
-  "let a = 10, b = func (a, b) { add(a, b) }
-   b(1, 2)")
+;(test 
+;  "" 
+;  "10" 
+;  "var1" 
+;  "let a = 10, b = var2" 
+;  "let a = 10, b = func (c, d) { add(a, d) }
+;   let a = 20
+;   b(1, 2)")
+
+(run-file "test.ks")

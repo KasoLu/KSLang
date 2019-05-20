@@ -17,3 +17,13 @@
 
 (define chars->number
   (pipe list->string string->number))
+
+(define read-file
+  (lambda (filename)
+    (let ([port (open-input-file filename #:mode 'text)])
+      (let loop ([line (read-line port)] [all ""])
+        (cond
+          [(eof-object? line) all]
+          [else
+           (loop (read-line port)
+                 (string-append all line "\n"))])))))

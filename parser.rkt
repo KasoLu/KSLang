@@ -7,14 +7,15 @@
 (provide parse (all-defined-out))
 
 ; ------ struct ------ ;
-(struct AST                       []          #:transparent)
-(struct AST:Prgm        AST       [exprs]     #:transparent)
-(struct AST:Expr        AST       [index]     #:transparent)
-(struct AST:Expr:Num    AST:Expr  [val]       #:transparent)
-(struct AST:Expr:Var    AST:Expr  [val]       #:transparent)
-(struct AST:Expr:Let    AST:Expr  [binds]     #:transparent)
-(struct AST:Expr:Func   AST:Expr  [vars body] #:transparent)
-(struct AST:Expr:Call   AST:Expr  [func vars] #:transparent)
+(struct AST                       []              #:transparent)
+(struct AST:Prgm        AST       [exprs]         #:transparent)
+(struct AST:Expr        AST       [index]         #:transparent)
+(struct AST:Expr:Num    AST:Expr  [val]           #:transparent)
+(struct AST:Expr:Var    AST:Expr  [val]           #:transparent)
+(struct AST:Expr:Let    AST:Expr  [binds]         #:transparent)
+(struct AST:Expr:Func   AST:Expr  [vars body]     #:transparent)
+(struct AST:Expr:Call   AST:Expr  [func vars]     #:transparent)
+(struct AST:Expr:Cond   AST:Expr  [tests exprs]   #:transparent)
 
 (struct Error [tag message] #:transparent)
 
@@ -47,6 +48,7 @@
        (@opt
          ($expr-let)
          ($expr-func)
+         ($expr-cond)
          ($expr-call)
          ($expr-var)
          ($expr-num)
@@ -105,6 +107,34 @@
          (match ts
            [(list func (list _ args _))
             (@const (AST:Expr:Call (AST:Expr-index func) func args))]))))
+
+($:: ($expr-cond)
+     ($:: ($expr-cond-begin)
+          (@~ "cond"))
+     ($:: ($expr-cond-test)
+          (@catch
+            (@seq (@_ "{") 
+                  (@* (@cat (@opt (@~ "else") ($expr))
+                            (@_ "->")
+                            ($expr-cond-body)))
+                  (@_ "}"))
+            (error-handle 'abort 'expr-cond)))
+     ($:: ($expr-cond-body)
+          (@catch
+            (@seq (@_ "{") (@* ($expr)) (@_ "}"))
+            (error-handle 'abort 'expr-cond)))
+     (@succ 
+       (@seq ($expr-cond-begin) ($expr-cond-test))
+       (lambda (t)
+         (match t
+           [(list idx (list _ tests _))
+            (let loop ([tests tests] [test-exprs '()] [body-exprs '()])
+              (if (null? tests)
+                (@const (AST:Expr:Cond idx (reverse test-exprs) (reverse body-exprs)))
+                (match (car tests)
+                  [(list idx/expr (list _ exprs _))
+                   (let ([else/expr (if (Index? idx/expr) (AST:Expr:Var idx/expr 'else) idx/expr)])
+                     (loop (cdr tests) (cons else/expr test-exprs) (cons exprs body-exprs)))])))]))))
 
 ($:: ($number)
      (@number (lambda (idx num) num)))
@@ -186,9 +216,10 @@
          (printf "cases: \"~a\" -> ~a~n" str (quote p))
          (scan str
            (lambda (ts)
-             (p ts
-                (lambda (val ts) (printf "parse: ~a~nrests: ~a~n" val ts))
-                (lambda (err ts) (printf "error: ~a~nrests: ~a~n" err ts)))))
+             (with-handlers ([exn:fail? (lambda (exn) (pretty-display (exn-message exn)))])
+               (p ts
+                  (lambda (val ts) (printf "parse: ~a~nrests: ~a~n" val ts))
+                  (lambda (err ts) (printf "error: ~a~nrests: ~a~n" err ts))))))
          (printf "~n"))
        (list strs ...))]))
 
@@ -222,6 +253,8 @@
 ;(@test ($program) 
 ;       "" "a" "10" "func" "let a = 10 b = 10" "var(10 20)"
 ;       "let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }")
+;(@test ($expr-cond)
+;       "" "cond" "cond { var -> { 10 } else -> { 20 } }")
 ;(parse 
 ;"let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }"
 ;(lambda (ast) (pretty-display ast)))
