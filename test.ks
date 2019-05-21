@@ -1,8 +1,18 @@
-let factorial = func (n, a) {
-  cond {
-    eq?(n, 1) -> { a }
-    else -> { factorial(sub(n, 1), mul(a, n)) }
+let Y-combinator =  
+  func (F) {
+    func (x) { x(x) } (
+      func (f) { F(func (v) { f(f)(v) }) }
+    )
   }
-}
-factorial(5, 1)
+
+Y-combinator( 
+  func (factorial) {
+    func (n) {
+      cond {
+        eq?(n, 1) -> { 1 }
+        else -> { mul(n, factorial(sub(n, 1))) }
+      }
+    }
+  }
+)(5)
 

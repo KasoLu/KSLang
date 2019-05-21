@@ -57,15 +57,20 @@
                   (lambda (val _)
                     (table-update! (env->table env) var val)
                     (loop (cdr binds))))]))))]
-      [(AST:Expr:Call idx func args)
+      [(AST:Expr:Call idx func argss)
        (value-of-expr func env fail
          (lambda (func-val _)
-           (let loop ([args args] [vals '()])
-             (if (null? args)
-               (value-of-call func-val (reverse vals) env fail cont)
-               (value-of-expr (car args) env fail
-                 (lambda (arg-val env)
-                   (loop (cdr args) (cons arg-val vals))))))))]
+           (let loop1 ([argss argss] [func func-val])
+             (if (null? argss)
+               (cont func env)
+               (let loop2 ([args (car argss)] [vals '()])
+                 (if (null? args)
+                   (value-of-call func (reverse vals) env fail
+                     (lambda (val _)
+                       (loop1 (cdr argss) val)))
+                   (value-of-expr (car args) env fail
+                     (lambda (arg-val env)
+                       (loop2 (cdr args) (cons arg-val vals))))))))))]
       [(AST:Expr:Cond (Index line cursor) tests exprs)
        (let loop ([tests tests] [exprs exprs])
          (if (null? tests)

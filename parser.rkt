@@ -46,10 +46,10 @@
 ($:: ($expr)
      (@catch 
        (@opt
+         ($expr-call)
          ($expr-let)
          ($expr-func)
          ($expr-cond)
-         ($expr-call)
          ($expr-var)
          ($expr-num)
          )
@@ -99,12 +99,18 @@
                   ($expr-func))))
      ($:: ($expr-call-args)
           (@catch
-            (@seq (@_ "(") (@.* ($expr) (@_ ",")) (@_ ")"))
+            (@+ (@seq (@_ "(") (@.* ($expr) (@_ ",")) (@_ ")")))
             (error-handle 'throw 'expr-call)))
      (@succ 
        (@seq ($expr-call-func) ($expr-call-args))
        (lambda (ts)
          (match ts
+           [(list func argss)
+            (let loop ([argss argss] [vals '()])
+              (if (null? argss)
+                (@const (AST:Expr:Call (AST:Expr-index func) func (reverse vals)))
+                (match (car argss)
+                  [(list _ args _) (loop (cdr argss) (cons args vals))])))]
            [(list func (list _ args _))
             (@const (AST:Expr:Call (AST:Expr-index func) func args))]))))
 
@@ -250,6 +256,8 @@
 ;       "()" "(var1)" "(var1, var2)")
 ;(@test ($expr-call)
 ;       "" "10" "func (var1, var2) { 10 } (var2, var3)")
+;(@test ($expr)
+;       "func (var1, var2) { 10 } (var2, var3)")
 ;(@test ($program) 
 ;       "" "a" "10" "func" "let a = 10 b = 10" "var(10 20)"
 ;       "let b = func (c) { let d = 1, e = func (f, g) { h(i, j) } l(m, n) }")
